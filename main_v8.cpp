@@ -246,6 +246,9 @@ int main() {
         }
     }
 
+//
+
+//
     std::cout << "\nClosing...\n";
     SetDeviceVideoCallBack(pHandle, nullptr, nullptr);
     SetTempCallBack(pHandle, nullptr, nullptr);
@@ -254,3 +257,9 @@ int main() {
     std::cout << "Done.\n";
     return 0;
 }
+
+//asdf
+
+//asdf
+
+// 새로운 내요
