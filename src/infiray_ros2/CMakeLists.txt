@@ -13,7 +13,8 @@ find_package(OpenCV REQUIRED)
 
 set(INFIRAY_SDK_DIR "/home/hyun/dev/sdks/infiray_sdk/IRT_InfraredTemp_SDK_Linux_X64_V1010/x64")
 
-add_executable(thermal_camera_node src/infiray_with_ros2.cpp)
+# add_executable(thermal_camera_node src/infiray_with_ros2.cpp)
+add_executable(thermal_camera_node src/infiray_with_ros2_fixed_fast.cpp)
 
 # 헤더 포함 (이제 충돌할 SDK 내 opencv 폴더가 없으므로 순서 상관 없음)
 target_include_directories(thermal_camera_node PUBLIC ${INFIRAY_SDK_DIR}/include)
