@@ -113,9 +113,20 @@ int main(int argc, char** argv) {
 
     // [수정점 1] QoS 프로필을 SensorData (Best Effort)로 변경하여 네트워크 지연 방지
     auto qos = rclcpp::SensorDataQoS();
-    auto image_pub = node->create_publisher<sensor_msgs::msg::Image>("/thermal/image", qos);
-    auto temp_pub = node->create_publisher<std_msgs::msg::Float32>("/thermal/max_temp", qos);
-    auto fire_pub = node->create_publisher<std_msgs::msg::Bool>("/thermal/fire_detected", qos);
+    auto image_pub = node->create_publisher<sensor_msgs::msg::Image>(
+        "/thermal/image",
+        rclcpp::SensorDataQoS()
+    );
+
+    auto temp_pub = node->create_publisher<std_msgs::msg::Float32>(
+        "/thermal/max_temp",
+        rclcpp::SensorDataQoS()
+    );
+
+    auto fire_pub = node->create_publisher<std_msgs::msg::Bool>(
+        "/thermal/fire_detected",
+        rclcpp::QoS(10).reliable()
+    );
 
     std::cout << "Starting Thermal App (ROS2 Integrated)\n";
     std::cout << "Local Display Mode: " << (show_display ? "ON" : "OFF") << "\n";
