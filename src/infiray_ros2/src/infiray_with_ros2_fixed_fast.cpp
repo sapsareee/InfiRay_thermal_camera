@@ -220,16 +220,16 @@ int main(int argc, char** argv) {
         cv::Mat yCrop = y(cropRect);
 
         cv::Mat avgMat;
-        cv::boxFilter(yCrop, avgMat, CV_8U, cv::Size(30, 30));
+        cv::boxFilter(yCrop, avgMat, CV_8U, cv::Size(20, 20));
         
         double minVal, maxVal;
         cv::Point minLoc, maxLoc;
         cv::minMaxLoc(avgMat, &minVal, &maxVal, &minLoc, &maxLoc);
 
-        int rectX = std::max(0, maxLoc.x - 15);
-        int rectY = std::max(0, maxLoc.y - 15);
-        if (rectX + 30 > procW) rectX = procW - 30;
-        if (rectY + 30 > procH) rectY = procH - 30;
+        int rectX = std::max(0, maxLoc.x - 10);
+        int rectY = std::max(0, maxLoc.y - 10);
+        if (rectX + 20 > procW) rectX = procW - 20;
+        if (rectY + 20 > procH) rectY = procH - 20;
 
         double celsius = 0.0;
         bool isTempValid = false;
