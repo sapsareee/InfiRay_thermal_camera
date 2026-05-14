@@ -23,6 +23,8 @@ MISSION_STATES = [
     "Retreating"
 ]
 
+VIDEO_SIZE = (288, 288)
+
 
 class ROS2Signals(QObject):
     # 가벼운 데이터만 Qt 시그널로 전달
@@ -133,7 +135,7 @@ class MainWindow(QMainWindow):
 
         # 왼쪽: 영상
         self.video_label = QLabel()
-        self.video_label.setFixedSize(640, 480)
+        self.video_label.setFixedSize(*VIDEO_SIZE)
         self.video_label.setStyleSheet(
             "border: 2px solid #7f8c8d; background-color: black;"
         )
@@ -225,6 +227,13 @@ class MainWindow(QMainWindow):
             if self.ros_node.latest_image is None:
                 return
             img_to_show = self.ros_node.latest_image.copy()
+
+        if (img_to_show.shape[1], img_to_show.shape[0]) != VIDEO_SIZE:
+            img_to_show = cv2.resize(
+                img_to_show,
+                VIDEO_SIZE,
+                interpolation=cv2.INTER_AREA if img_to_show.shape[1] > VIDEO_SIZE[0] else cv2.INTER_LINEAR,
+            )
 
         qt_img = self.convert_cv_to_qt(img_to_show)
         self.video_label.setPixmap(qt_img)
