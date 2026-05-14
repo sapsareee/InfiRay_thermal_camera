@@ -203,11 +203,13 @@ int main(int argc, char** argv) {
     const auto IMAGE_FRAME_INTERVAL = duration<double>(1.0 / TARGET_IMAGE_FPS);
     auto last_image_pub_time = steady_clock::now();
 
-    const double FIRE_THRESHOLD_C = 80.0;
-    const double FIRE_HOLD_SECONDS = 1.0;
-    const double TREND_WINDOW_SECONDS = 3.0;
-    const double AVG_TEMP_MIN_FOR_FIRE = 50.0;
-    const double TREND_MIN_C_PER_SEC = 0.3;
+    const double FIRE_THRESHOLD_C = 25.0; // 불 감지 임계 온도 (Celsius)
+    const double FIRE_HOLD_SECONDS = 1.0; // 임계 온도 이상 지속 시간 (초)
+    const double TREND_WINDOW_SECONDS = 3.0; // 온도 상승 추세 계산을 위한 시간 창 (초)
+    const double AVG_TEMP_MIN_FOR_FIRE = 50.0; // 불로 간주하기 위한 평균 온도 최소값 (Celsius)
+    const double TREND_MIN_C_PER_SEC = 0.3; // 불로 간주하기 위한 온도 상승 추세 최소값 (Celsius/초)
+    // 화재 판정 논리 fireCandidate = sustainedHot && (avgHotEnough || trendRisingEnough);
+    
 
     auto hot_above_since = steady_clock::time_point::min();
     std::deque<TempTrendSample> trend_history;
