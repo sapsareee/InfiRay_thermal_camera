@@ -268,7 +268,7 @@ int main(int argc, char** argv) {
         }
 
         // 확대 비율(scale) 제거로 좌표 원복
-        cv::Rect hotZone(rectX, rectY, 30, 30);
+        cv::Rect hotZone(rectX, rectY, 20, 20);
         cv::rectangle(displayMat, hotZone, cv::Scalar(0, 255, 0), 2);
 
         char textBuf[64];
@@ -280,6 +280,12 @@ int main(int argc, char** argv) {
 
         cv::Point textLoc(hotZone.x, hotZone.y - 10);
         if (textLoc.y < 20) textLoc.y = hotZone.y + hotZone.height + 25;
+        // 텍스트가 오른쪽 밖으로 나가지 않도록 폭 기준으로 x 좌표를 보정
+        int baseline = 0;
+        cv::Size textSize = cv::getTextSize(textBuf, cv::FONT_HERSHEY_SIMPLEX, 0.4, 1, &baseline);
+        int maxTextX = std::max(0, displayMat.cols - textSize.width - 2);
+        if (textLoc.x > maxTextX) textLoc.x = maxTextX;
+        if (textLoc.x < 0) textLoc.x = 0;
         // 폰트 크기 약간 축소 (원본 해상도에 맞춤)
         cv::putText(displayMat, textBuf, textLoc, cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0, 255, 0), 1);
 
