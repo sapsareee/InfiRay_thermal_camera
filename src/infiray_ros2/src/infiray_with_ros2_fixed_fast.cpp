@@ -61,6 +61,8 @@ static int g_width = 0;
 static int g_height = 0;
 static std::atomic<bool> g_hasNewFrame{false};
 static std::atomic<bool> g_running{true};
+static std::atomic<bool> g_loggedInputResolution{false};
+static std::atomic<bool> g_loggedOutputResolution{false};
 
 // ---- 온도 데이터 버퍼 ----
 static std::mutex g_tempMtx;
@@ -70,6 +72,10 @@ static std::vector<uint16_t> g_tempBuf;
 void videoCallBack(char *pBuffer, long BufferLen, int width, int height, void *pContext) {
     const long expected = (long)(width * height * 3 / 2);
     if (BufferLen != expected || pBuffer == nullptr) return;
+
+    if (!g_loggedInputResolution.exchange(true)) {
+        std::cout << "[Input] Thermal frame: " << width << " x " << height << std::endl;
+    }
 
     {
         std::lock_guard<std::mutex> lk(g_mtx);
@@ -174,6 +180,8 @@ int main(int argc, char** argv) {
 
     int displayMode = 1;
     cv::Mat displayMat;
+    const int targetW = 288;
+    const int targetH = 288;
 
     while (rclcpp::ok() && g_running.load()) {
         int localW = 0, localH = 0, localIdx = -1;
@@ -199,13 +207,20 @@ int main(int argc, char** argv) {
             continue;
         }
         
+        const int procW = std::min(targetW, localW);
+        const int procH = std::min(targetH, localH);
+        const int cropX = std::max(0, (localW - procW) / 2);
+        const int cropY = std::max(0, (localH - procH) / 2);
+        cv::Rect cropRect(cropX, cropY, procW, procH);
+
         auto &buf = g_yuvBuf[localIdx];
         if ((int)buf.size() < localW * localH) continue;
 
         cv::Mat y(localH, localW, CV_8UC1, (void*)buf.data());
+        cv::Mat yCrop = y(cropRect);
 
         cv::Mat avgMat;
-        cv::boxFilter(y, avgMat, CV_8U, cv::Size(30, 30));
+        cv::boxFilter(yCrop, avgMat, CV_8U, cv::Size(30, 30));
         
         double minVal, maxVal;
         cv::Point minLoc, maxLoc;
@@ -213,8 +228,8 @@ int main(int argc, char** argv) {
 
         int rectX = std::max(0, maxLoc.x - 15);
         int rectY = std::max(0, maxLoc.y - 15);
-        if (rectX + 30 > localW) rectX = localW - 30;
-        if (rectY + 30 > localH) rectY = localH - 30;
+        if (rectX + 30 > procW) rectX = procW - 30;
+        if (rectY + 30 > procH) rectY = procH - 30;
 
         double celsius = 0.0;
         bool isTempValid = false;
@@ -225,7 +240,7 @@ int main(int argc, char** argv) {
                 int count = 0;
                 for (int ty = rectY; ty < rectY + 30; ty++) {
                     for (int tx = rectX; tx < rectX + 30; tx++) {
-                        sumTemp += g_tempBuf[ty * localW + tx]; 
+                        sumTemp += g_tempBuf[(cropY + ty) * localW + (cropX + tx)]; 
                         count++;
                     }
                 }
@@ -247,9 +262,9 @@ int main(int argc, char** argv) {
 
         // [수정점 2] 불필요한 이미지 확대(Resize) 제거하여 데이터 전송량 감소
         if (displayMode == 1) {
-            cv::cvtColor(y, displayMat, cv::COLOR_GRAY2BGR);
+            cv::cvtColor(yCrop, displayMat, cv::COLOR_GRAY2BGR);
         } else {
-            cv::applyColorMap(y, displayMat, cv::COLORMAP_INFERNO);
+            cv::applyColorMap(yCrop, displayMat, cv::COLORMAP_INFERNO);
         }
 
         // 확대 비율(scale) 제거로 좌표 원복
@@ -271,6 +286,10 @@ int main(int argc, char** argv) {
         std_msgs::msg::Header header;
         header.stamp = node->now();
         header.frame_id = "thermal_camera_frame";
+        if (!g_loggedOutputResolution.exchange(true)) {
+            std::cout << "[Output] ROS image: " << displayMat.cols << " x " << displayMat.rows
+                      << " (channels: " << displayMat.channels() << ")" << std::endl;
+        }
         sensor_msgs::msg::Image::SharedPtr img_msg = cv_bridge::CvImage(header, "bgr8", displayMat).toImageMsg();
         image_pub->publish(*img_msg);
 
