@@ -141,8 +141,13 @@ int main(int argc, char** argv) {
         rclcpp::QoS(1).reliable()  // depth=1, reliable for minimal latency
     );
 
-    auto temp_pub = node->create_publisher<std_msgs::msg::Float32>(
-        "/thermal/max_temp",
+    auto avg_temp_pub = node->create_publisher<std_msgs::msg::Float32>(
+        "/thermal/average_temperature",
+        rclcpp::QoS(1).reliable()  // depth=1
+    );
+
+    auto max_temp_pub = node->create_publisher<std_msgs::msg::Float32>(
+        "/thermal/max_temperature",
         rclcpp::QoS(1).reliable()  // depth=1
     );
 
@@ -376,9 +381,15 @@ int main(int argc, char** argv) {
             image_pub->publish(*img_msg);
         }
 
-        std_msgs::msg::Float32 temp_msg;
-        temp_msg.data = isTempValid ? avgCelsius : 0.0;
-        temp_pub->publish(temp_msg);
+        if (isTempValid) {
+            std_msgs::msg::Float32 avg_temp_msg;
+            avg_temp_msg.data = static_cast<float>(avgCelsius);
+            avg_temp_pub->publish(avg_temp_msg);
+
+            std_msgs::msg::Float32 max_temp_msg;
+            max_temp_msg.data = static_cast<float>(maxCelsius);
+            max_temp_pub->publish(max_temp_msg);
+        }
 
         std_msgs::msg::Bool fire_msg;
         fire_msg.data = (isTempValid && fireCandidate);

@@ -14,16 +14,20 @@ find_package(OpenCV REQUIRED)
 set(INFIRAY_SDK_DIR "/home/hyun/dev/sdks/infiray_sdk/IRT_InfraredTemp_SDK_Linux_X64_V1010/x64")
 
 # add_executable(thermal_camera_node src/infiray_with_ros2.cpp)
-add_executable(thermal_camera_node src/infiray_with_ros2_fixed_fast.cpp)
+add_executable(thermal_camera_fixed_fast src/infiray_with_ros2_fixed_fast.cpp)
+add_executable(thermal_camera_fire_detect src/infiray_fire_detect.cpp)
+
 
 # 헤더 포함 (이제 충돌할 SDK 내 opencv 폴더가 없으므로 순서 상관 없음)
-target_include_directories(thermal_camera_node PUBLIC ${INFIRAY_SDK_DIR}/include)
+target_include_directories(thermal_camera_fixed_fast PUBLIC ${INFIRAY_SDK_DIR}/include)
+target_include_directories(thermal_camera_fire_detect PUBLIC ${INFIRAY_SDK_DIR}/include)
 
 # ROS2 및 OpenCV 의존성을 아주 깔끔하게 주입
-ament_target_dependencies(thermal_camera_node rclcpp sensor_msgs std_msgs cv_bridge OpenCV)
+ament_target_dependencies(thermal_camera_fixed_fast rclcpp sensor_msgs std_msgs cv_bridge OpenCV)
+ament_target_dependencies(thermal_camera_fire_detect rclcpp sensor_msgs std_msgs cv_bridge OpenCV)
 
 # InfiRay 전용 라이브러리만 링크
-target_link_libraries(thermal_camera_node
+target_link_libraries(thermal_camera_fixed_fast
   ${INFIRAY_SDK_DIR}/libs/libInfraredTempSDK.so
   ${INFIRAY_SDK_DIR}/libs/libIRNetClient.so
   ${INFIRAY_SDK_DIR}/libs/libhyvstream.so
@@ -31,10 +35,22 @@ target_link_libraries(thermal_camera_node
   curl ssl crypto pthread z lzma
 )
 
-set_target_properties(thermal_camera_node PROPERTIES 
+target_link_libraries(thermal_camera_fire_detect
+  ${INFIRAY_SDK_DIR}/libs/libInfraredTempSDK.so
+  ${INFIRAY_SDK_DIR}/libs/libIRNetClient.so
+  ${INFIRAY_SDK_DIR}/libs/libhyvstream.so
+  ${INFIRAY_SDK_DIR}/libs/libhttpclient.so
+  curl ssl crypto pthread z lzma
+)
+
+set_target_properties(thermal_camera_fixed_fast PROPERTIES 
+  BUILD_WITH_INSTALL_RPATH TRUE 
+  INSTALL_RPATH "${INFIRAY_SDK_DIR}/libs"
+)
+set_target_properties(thermal_camera_fire_detect PROPERTIES 
   BUILD_WITH_INSTALL_RPATH TRUE 
   INSTALL_RPATH "${INFIRAY_SDK_DIR}/libs"
 )
 
-install(TARGETS thermal_camera_node DESTINATION lib/${PROJECT_NAME})
+install(TARGETS thermal_camera_fixed_fast thermal_camera_fire_detect DESTINATION lib/${PROJECT_NAME})
 ament_package()
