@@ -141,8 +141,8 @@ int main(int argc, char** argv) {
         rclcpp::QoS(1).reliable()  // depth=1, reliable for minimal latency
     );
 
-    auto avg_temp_pub = node->create_publisher<std_msgs::msg::Float32>(
-        "/thermal/average_temperature",
+    auto trend_pub = node->create_publisher<std_msgs::msg::Float32>(
+        "/thermal/temperature_trend",
         rclcpp::QoS(1).reliable()  // depth=1
     );
 
@@ -382,9 +382,9 @@ int main(int argc, char** argv) {
         }
 
         if (isTempValid) {
-            std_msgs::msg::Float32 avg_temp_msg;
-            avg_temp_msg.data = static_cast<float>(avgCelsius);
-            avg_temp_pub->publish(avg_temp_msg);
+            std_msgs::msg::Float32 trend_msg;
+            trend_msg.data = static_cast<float>(trendCelsiusPerSec);
+            trend_pub->publish(trend_msg);
 
             std_msgs::msg::Float32 max_temp_msg;
             max_temp_msg.data = static_cast<float>(maxCelsius);
