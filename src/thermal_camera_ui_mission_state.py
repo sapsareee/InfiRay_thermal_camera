@@ -56,7 +56,7 @@ class ThermalUINode(Node):
         )
         self.temp_sub = self.create_subscription(
             Float32,
-            '/thermal/max_temp',
+            '/thermal/max_temperature',
             self.temp_callback,
             qos_profile_sensor_data
         )

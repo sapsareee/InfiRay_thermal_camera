@@ -49,8 +49,11 @@ set_target_properties(thermal_camera_fixed_fast PROPERTIES
 )
 set_target_properties(thermal_camera_fire_detect PROPERTIES 
   BUILD_WITH_INSTALL_RPATH TRUE 
-  INSTALL_RPATH "${INFIRAY_SDK_DIR}/libs"
+  # DT_RPATH를 사용해 전역 /usr/lib/TmSDK보다 시스템 런타임을 먼저 선택한다.
+  # SDK에만 있는 라이브러리는 마지막 경로에서 계속 찾는다.
+  INSTALL_RPATH "/lib/x86_64-linux-gnu;/usr/lib/x86_64-linux-gnu;${INFIRAY_SDK_DIR}/libs"
 )
+target_link_options(thermal_camera_fire_detect PRIVATE "-Wl,--disable-new-dtags")
 
 install(TARGETS thermal_camera_fixed_fast thermal_camera_fire_detect DESTINATION lib/${PROJECT_NAME})
 ament_package()
