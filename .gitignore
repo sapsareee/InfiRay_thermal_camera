@@ -1,0 +1,8 @@
+# 제외할 디렉터리 및 부산물 지정
+build/
+install/
+log/
+**/__pycache__/
+
+# infiray_ros2 작업물 제외
+# src/infiray_ros2/
