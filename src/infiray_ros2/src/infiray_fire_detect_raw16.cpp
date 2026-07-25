@@ -21,6 +21,7 @@
 #include "std_msgs/msg/float32.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "cv_bridge/cv_bridge.h"
+#include "Fieldscale.h"
 
 using namespace std;
 
@@ -226,7 +227,7 @@ void directTempCallBack(char *pBuffer, int bufferLen, void *pContext) {
 
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
-    auto node = rclcpp::Node::make_shared("thermal_camera_node");
+    auto node = rclcpp::Node::make_shared("thermal_camera_raw16_node");
 
     const bool show_display = node->declare_parameter<bool>("show_display", false);
     const bool use_low_latency_rtsp =
@@ -242,12 +243,35 @@ int main(int argc, char** argv) {
     const int camera_image_fps = static_cast<int>(
         node->declare_parameter<int64_t>("camera_image_fps", 0));
     const double target_image_fps =
-        node->declare_parameter<double>("target_image_fps", 10.0);
+        node->declare_parameter<double>("target_image_fps", 30.0);
+    const bool fieldscale_enabled =
+        node->declare_parameter<bool>("fieldscale_enabled", true);
+    const double fieldscale_max_diff =
+        node->declare_parameter<double>("fieldscale_max_diff", 400.0);
+    const double fieldscale_min_diff =
+        node->declare_parameter<double>("fieldscale_min_diff", 400.0);
+    const int fieldscale_iterations = static_cast<int>(
+        node->declare_parameter<int64_t>("fieldscale_iterations", 7));
+    const double fieldscale_gamma =
+        node->declare_parameter<double>("fieldscale_gamma", 1.5);
+    const bool fieldscale_clahe =
+        node->declare_parameter<bool>("fieldscale_clahe", false);
+    const bool fieldscale_video =
+        node->declare_parameter<bool>("fieldscale_video", true);
     std::string rtsp_transport =
         node->declare_parameter<std::string>("rtsp_transport", "udp");
 
     if (target_image_fps <= 0.0 || target_image_fps > 60.0) {
         RCLCPP_ERROR(node->get_logger(), "target_image_fps must be in (0, 60]");
+        rclcpp::shutdown();
+        return -1;
+    }
+    if (fieldscale_max_diff < 0.0 || fieldscale_min_diff < 0.0 ||
+        fieldscale_iterations <= 0 || fieldscale_gamma <= 0.0) {
+        RCLCPP_ERROR(
+            node->get_logger(),
+            "Invalid Fieldscale parameters: differences must be non-negative, "
+            "iterations and gamma must be positive");
         rclcpp::shutdown();
         return -1;
     }
@@ -285,8 +309,18 @@ int main(int argc, char** argv) {
     std::cout << "Video Input: "
               << (use_low_latency_rtsp ? "Direct vendor RTSP" : "SDK wrapper")
               << "\n";
+    std::cout << "Fieldscale: " << (fieldscale_enabled ? "ON" : "OFF")
+              << " (video=" << (fieldscale_video ? "ON" : "OFF")
+              << ", clahe=" << (fieldscale_clahe ? "ON" : "OFF") << ")\n";
 
     cv::setNumThreads(1);
+    Fieldscale fieldscale(
+        fieldscale_max_diff,
+        fieldscale_min_diff,
+        fieldscale_iterations,
+        fieldscale_gamma,
+        fieldscale_clahe,
+        fieldscale_video);
 
     int deviceType = 1; 
     std::vector<char> username(camera_username.begin(), camera_username.end());
@@ -455,6 +489,7 @@ int main(int argc, char** argv) {
     std::deque<TempTrendSample> trend_history;
 
     std::vector<uint8_t> localGrayBuf;
+    std::vector<uint16_t> localTempBuf;
     int localW = 0;
     int localH = 0;
     uint64_t currentFrameSequence = 0;
@@ -466,6 +501,9 @@ int main(int argc, char** argv) {
     uint64_t lastProcessedFrames = 0;
     uint64_t lastDroppedFrames = 0;
     uint64_t lastPublishedFrames = 0;
+    uint64_t fieldscaleCount = 0;
+    uint64_t fieldscaleTotalUs = 0;
+    uint64_t fieldscaleMaxUs = 0;
     auto lastStatsTime = steady_clock::now();
     std_msgs::msg::Header currentFrameHeader;
     currentFrameHeader.frame_id = "thermal_camera_frame";
@@ -505,11 +543,14 @@ int main(int argc, char** argv) {
             ? static_cast<double>(intervalTotalUs) / intervalCount / 1000.0 : 0.0;
         const double workAvgMs = workCount > 0
             ? static_cast<double>(workTotalUs) / workCount / 1000.0 : 0.0;
+        const double fieldscaleAvgMs = fieldscaleCount > 0
+            ? static_cast<double>(fieldscaleTotalUs) / fieldscaleCount / 1000.0 : 0.0;
 
         RCLCPP_INFO(
             node->get_logger(),
             "pipeline %.1fs | source %s | input %.1f Hz | new %.1f Hz | pub %.1f Hz | "
-            "drop %llu (total %llu), reject %llu | input dt %.2f/%.2f ms, copy %.3f/%.3f ms",
+            "drop %llu (total %llu), reject %llu | input dt %.2f/%.2f ms, "
+            "copy %.3f/%.3f ms | fieldscale %.2f/%.2f ms",
             elapsed,
             videoSourceName(g_activeVideoSource.load(std::memory_order_acquire)),
             static_cast<double>(received - lastReceivedFrames) / elapsed,
@@ -521,13 +562,18 @@ int main(int argc, char** argv) {
             intervalAvgMs,
             static_cast<double>(intervalMaxUs) / 1000.0,
             workAvgMs,
-            static_cast<double>(workMaxUs) / 1000.0);
+            static_cast<double>(workMaxUs) / 1000.0,
+            fieldscaleAvgMs,
+            static_cast<double>(fieldscaleMaxUs) / 1000.0);
 
         lastReceivedFrames = received;
         lastRejectedFrames = rejected;
         lastProcessedFrames = processedFrames;
         lastDroppedFrames = droppedFrames;
         lastPublishedFrames = publishedFrames;
+        fieldscaleCount = 0;
+        fieldscaleTotalUs = 0;
+        fieldscaleMaxUs = 0;
         lastStatsTime = now;
     };
 
@@ -535,7 +581,7 @@ int main(int argc, char** argv) {
     while (rclcpp::ok() && g_running.load()) {
         {
             std::unique_lock<std::mutex> lk(g_mtx);
-            // SDK 콜백 도착 시점과 무관하게 정확히 10 Hz tick까지 기다린다.
+            // SDK 콜백 도착 시점과 무관하게 설정된 출력 주기의 tick까지 기다린다.
             g_cv.wait_until(lk, next_image_tick, [] {
                 return !g_running.load() || !rclcpp::ok();
             });
@@ -599,66 +645,86 @@ int main(int argc, char** argv) {
         {
             std::lock_guard<std::mutex> lk(g_tempMtx);
             if (!g_tempBuf.empty() && (int)g_tempBuf.size() == localW * localH) {
-                long long sumTemp = 0;
-                uint16_t maxRawTemp = 0;
-                int count = 0;
-                for (int ty = rectY; ty < rectY + ROI_SIZE; ty++) {
-                    for (int tx = rectX; tx < rectX + ROI_SIZE; tx++) {
-                        uint16_t rawTemp = g_tempBuf[ty * localW + tx];
-                        sumTemp += rawTemp;
-                        if (rawTemp > maxRawTemp) {
-                            maxRawTemp = rawTemp;
-                        }
-                        count++;
-                    }
-                }
-
-                double avgRawTemp = (double)sumTemp / count;
-                avgCelsius = rawToCelsius(avgRawTemp);
-                maxCelsius = rawToCelsius((double)maxRawTemp);
-                isTempValid = true;
-
-                auto now = steady_clock::now();
-                trend_history.push_back({now, avgCelsius});
-                while (!trend_history.empty()) {
-                    auto age = duration<double>(now - trend_history.front().stamp).count();
-                    if (age <= TREND_WINDOW_SECONDS) {
-                        break;
-                    }
-                    trend_history.pop_front();
-                }
-
-                if (trend_history.size() >= 2) {
-                    const auto &first = trend_history.front();
-                    const auto &last = trend_history.back();
-                    double elapsed = duration<double>(last.stamp - first.stamp).count();
-                    if (elapsed > 0.0) {
-                        trendCelsiusPerSec = (last.avgCelsius - first.avgCelsius) / elapsed;
-                    }
-                }
-
-                if (maxCelsius >= FIRE_THRESHOLD_C) {
-                    if (hot_above_since == steady_clock::time_point::min()) {
-                        hot_above_since = now;
-                    }
-                    holdSeconds = duration<double>(now - hot_above_since).count();
-                } else {
-                    hot_above_since = steady_clock::time_point::min();
-                    holdSeconds = 0.0;
-                }
-
-                const bool sustainedHot = (holdSeconds >= FIRE_HOLD_SECONDS);
-                const bool avgHotEnough = (avgCelsius >= AVG_TEMP_MIN_FOR_FIRE);
-                const bool trendRisingEnough = (trendCelsiusPerSec >= TREND_MIN_C_PER_SEC);
-                fireCandidate = sustainedHot && (avgHotEnough || trendRisingEnough);
+                localTempBuf.assign(g_tempBuf.begin(), g_tempBuf.end());
+            } else {
+                localTempBuf.clear();
             }
         }
 
-        // [수정점 2] 불필요한 이미지 확대(Resize) 제거하여 데이터 전송량 감소
+        if (!localTempBuf.empty()) {
+            long long sumTemp = 0;
+            uint16_t maxRawTemp = 0;
+            int count = 0;
+            for (int ty = rectY; ty < rectY + ROI_SIZE; ty++) {
+                for (int tx = rectX; tx < rectX + ROI_SIZE; tx++) {
+                    uint16_t rawTemp = localTempBuf[ty * localW + tx];
+                    sumTemp += rawTemp;
+                    if (rawTemp > maxRawTemp) {
+                        maxRawTemp = rawTemp;
+                    }
+                    count++;
+                }
+            }
+
+            double avgRawTemp = (double)sumTemp / count;
+            avgCelsius = rawToCelsius(avgRawTemp);
+            maxCelsius = rawToCelsius((double)maxRawTemp);
+            isTempValid = true;
+
+            auto now = steady_clock::now();
+            trend_history.push_back({now, avgCelsius});
+            while (!trend_history.empty()) {
+                auto age = duration<double>(now - trend_history.front().stamp).count();
+                if (age <= TREND_WINDOW_SECONDS) {
+                    break;
+                }
+                trend_history.pop_front();
+            }
+
+            if (trend_history.size() >= 2) {
+                const auto &first = trend_history.front();
+                const auto &last = trend_history.back();
+                double elapsed = duration<double>(last.stamp - first.stamp).count();
+                if (elapsed > 0.0) {
+                    trendCelsiusPerSec = (last.avgCelsius - first.avgCelsius) / elapsed;
+                }
+            }
+
+            if (maxCelsius >= FIRE_THRESHOLD_C) {
+                if (hot_above_since == steady_clock::time_point::min()) {
+                    hot_above_since = now;
+                }
+                holdSeconds = duration<double>(now - hot_above_since).count();
+            } else {
+                hot_above_since = steady_clock::time_point::min();
+                holdSeconds = 0.0;
+            }
+
+            const bool sustainedHot = (holdSeconds >= FIRE_HOLD_SECONDS);
+            const bool avgHotEnough = (avgCelsius >= AVG_TEMP_MIN_FOR_FIRE);
+            const bool trendRisingEnough = (trendCelsiusPerSec >= TREND_MIN_C_PER_SEC);
+            fireCandidate = sustainedHot && (avgHotEnough || trendRisingEnough);
+        }
+
+        cv::Mat fieldscaledGray;
+        const cv::Mat* outputGray = &y;
+        if (fieldscale_enabled && !localTempBuf.empty()) {
+            cv::Mat rawTemp(localH, localW, CV_16UC1, localTempBuf.data());
+            const auto fieldscaleStart = steady_clock::now();
+            fieldscaledGray = fieldscale.process(rawTemp);
+            const auto fieldscaleUs = static_cast<uint64_t>(
+                duration_cast<microseconds>(steady_clock::now() - fieldscaleStart).count());
+            ++fieldscaleCount;
+            fieldscaleTotalUs += fieldscaleUs;
+            fieldscaleMaxUs = std::max(fieldscaleMaxUs, fieldscaleUs);
+            outputGray = &fieldscaledGray;
+        }
+
+        // 불필요한 이미지 확대(Resize) 없이 원본 해상도로 송출한다.
         if (displayMode == 1) {
-            cv::cvtColor(y, displayMat, cv::COLOR_GRAY2BGR);
+            cv::cvtColor(*outputGray, displayMat, cv::COLOR_GRAY2BGR);
         } else {
-            cv::applyColorMap(y, displayMat, cv::COLORMAP_INFERNO);
+            cv::applyColorMap(*outputGray, displayMat, cv::COLORMAP_INFERNO);
         }
 
         // 확대 비율(scale) 제거로 좌표 원복
@@ -697,7 +763,7 @@ int main(int argc, char** argv) {
         cv::putText(displayMat, metrics3, cv::Point(overlayX, overlayY + lineGap * 2), cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(255, 255, 255), 1);
         cv::putText(displayMat, metrics4, cv::Point(overlayX, overlayY + lineGap * 3), cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(fireCandidate ? 0 : 255, fireCandidate ? 255 : 255, 0), 1);
 
-        // 이 루프 자체가 10 Hz 고정 tick이므로 영상과 상태 토픽을 같은 주기로 발행한다.
+        // 영상과 상태 토픽을 설정된 고정 tick 주기로 함께 발행한다.
         // 새 SDK 프레임이 늦으면 마지막 영상을 재사용하되, 원래 프레임 timestamp는 유지한다.
         sensor_msgs::msg::Image::SharedPtr img_msg =
             cv_bridge::CvImage(currentFrameHeader, "bgr8", displayMat).toImageMsg();

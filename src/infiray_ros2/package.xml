@@ -13,6 +13,7 @@
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>cv_bridge</depend>
+  <depend>fieldscale_cpp</depend>
 
   <export>
     <build_type>ament_cmake</build_type>

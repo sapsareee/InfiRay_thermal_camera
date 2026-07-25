@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EV Fire-Fighting Robot Control Center</title>
+    <script src="https://cdn.jsdelivr.net/npm/eventemitter2@6.4.9/lib/eventemitter2.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/roslib@1/build/roslib.min.js"></script>
+    <style>
+        body { background-color: #2c3e50; color: white; font-family: sans-serif; margin: 20px; }
+        #status-label { 
+            font-size: 24pt; font-weight: bold; background-color: #34495e; 
+            text-align: center; padding: 15px; margin-bottom: 20px; border-radius: 5px; 
+        }
+        .container { display: flex; gap: 20px; justify-content: center; }
+        .video-container { 
+            border: 2px solid #7f8c8d; background-color: black; 
+            width: 640px; height: 480px; display: flex; align-items: center; justify-content: center;
+        }
+        #video-stream { max-width: 100%; max-height: 100%; }
+        .info-panel { display: flex; flex-direction: column; gap: 20px; width: 300px; }
+        .group-box { 
+            border: 1px solid #7f8c8d; padding: 15px; border-radius: 5px; background-color: #34495e; 
+        }
+        .group-title { margin-top: 0; font-size: 14pt; color: #ecf0f1; border-bottom: 1px solid #7f8c8d; padding-bottom: 5px; }
+        #temp-display { font-size: 40pt; color: #e74c3c; font-family: 'Consolas', monospace; margin: 10px 0; text-align: center; }
+        .state-list { font-size: 12pt; color: #95a5a6; line-height: 1.8; list-style-type: none; padding: 0; margin: 0; }
+        #stop-btn { 
+            background-color: #c0392b; color: white; font-weight: bold; font-size: 16pt; 
+            height: 60px; border: none; border-radius: 5px; cursor: pointer; transition: background-color 0.2s;
+        }
+        #stop-btn:hover { background-color: #e74c3c; }
+        #stop-btn:active { background-color: #922b21; }
+    </style>
+</head>
+<body>
+
+    <div id="status-label">CONNECTING TO ROS...</div>
+
+    <div class="container">
+        <div class="video-container">
+            <img id="video-stream" src="" alt="Waiting for Video Stream...">
+        </div>
+
+        <div class="info-panel">
+            <div class="group-box">
+                <h3 class="group-title">Thermal Info</h3>
+                <div id="temp-display">0.0 °C</div>
+            </div>
+
+            <div class="group-box">
+                <h3 class="group-title">Mission Status</h3>
+                <ul class="state-list">
+                    <li>1. Searching</li>
+                    <li>2. Fire Detected</li>
+                    <li>3. Aligning</li>
+                    <li>4. Deploying Cover</li>
+                    <li>5. Retreating</li>
+                </ul>
+            </div>
+
+            <button id="stop-btn" onclick="sendEmergencyStop()">EMERGENCY STOP</button>
+        </div>
+    </div>
+
+    <script>
+        // 로봇의 IP 주소를 입력하세요 (현재 PC에서 돌린다면 localhost 유지)
+        const ROBOT_IP = location.hostname || 'localhost';
+
+        // 이미지 스트림 소스 설정 (web_video_server)
+        document.getElementById('video-stream').src = `http://${ROBOT_IP}:8080/stream?topic=/thermal/image`;
+        // 1. ROS 연결 (rosbridge)
+        var ros = new ROSLIB.Ros({
+            url : `ws://${ROBOT_IP}:9090`
+        });
+
+        ros.on('connection', function() {
+            document.getElementById('status-label').innerText = "MONITORING...";
+            console.log('Connected to websocket server.');
+        });
+
+        ros.on('error', function(error) {
+            document.getElementById('status-label').innerText = "CONNECTION ERROR";
+            console.log('Error connecting to websocket server: ', error);
+        });
+
+        ros.on('close', function() {
+            document.getElementById('status-label').innerText = "CONNECTION CLOSED";
+            console.log('Connection to websocket server closed.');
+        });
+
+        // 2. 온도 구독 (Subscriber)
+        var tempSub = new ROSLIB.Topic({
+            ros : ros,
+            name : '/thermal/max_temp',
+            messageType : 'std_msgs/msg/Float32'
+        });
+
+        tempSub.subscribe(function(message) {
+            var tempDisplay = document.getElementById('temp-display');
+            var temp = message.data;
+            tempDisplay.innerText = temp.toFixed(1) + " °C";
+            
+            if (temp > 60.0) {
+                tempDisplay.style.color = "#ff0000";
+                tempDisplay.style.fontWeight = "bold";
+            } else {
+                tempDisplay.style.color = "#e74c3c";
+                tempDisplay.style.fontWeight = "normal";
+            }
+        });
+
+        // 3. 화재 상태 구독 (Subscriber)
+        var fireSub = new ROSLIB.Topic({
+            ros : ros,
+            name : '/thermal/fire_detected',
+            messageType : 'std_msgs/msg/Bool'
+        });
+
+        fireSub.subscribe(function(message) {
+            var statusLabel = document.getElementById('status-label');
+            if (message.data) {
+                statusLabel.innerText = "🔥 FIRE DETECTED! 🔥";
+                statusLabel.style.backgroundColor = "#c0392b";
+                statusLabel.style.color = "yellow";
+            } else {
+                statusLabel.innerText = "MONITORING...";
+                statusLabel.style.backgroundColor = "#34495e";
+                statusLabel.style.color = "white";
+            }
+        });
+
+        // 4. 비상 정지 발행 (Publisher)
+        var stopPub = new ROSLIB.Topic({
+            ros : ros,
+            name : '/emergency_stop',
+            messageType : 'std_msgs/msg/Bool'
+        });
+
+        function sendEmergencyStop() {
+            var msg = new ROSLIB.Message({
+                data : true
+            });
+            stopPub.publish(msg);
+            alert("EMERGENCY STOP COMMAND SENT!");
+        }
+    </script>
+</body>
+</html>
