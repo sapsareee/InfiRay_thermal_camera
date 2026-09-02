@@ -725,15 +725,11 @@ class MainWindow(QMainWindow):
         self.rgb_detected = False
         self.current_fire = False
         self.paused = False
-        self.blink_on = False
         self.last_banner_state: Optional[tuple[bool, bool, bool]] = None
 
         self.init_ui()
         self.open_videos()
 
-        self.blink_timer = QTimer(self)
-        self.blink_timer.timeout.connect(self.animate_fire_banner)
-        self.blink_timer.start(450)
         self.update_final_decision(force=True)
 
     def init_ui(self) -> None:
@@ -789,6 +785,7 @@ class MainWindow(QMainWindow):
         content.setColumnStretch(1, 1)
         content.setRowStretch(0, 1)
         content.setRowStretch(1, 0)
+        content.setRowStretch(2, 0)
         root.addLayout(content, 1)
 
         thermal_group, self.thermal_video_label = self.create_video_group(
@@ -802,18 +799,8 @@ class MainWindow(QMainWindow):
         content.addWidget(rgb_group, 0, 1)
 
         thermal_analysis = QGroupBox("Real-Time Thermal Analysis")
-        thermal_layout = QVBoxLayout(thermal_analysis)
-        thermal_layout.setSpacing(5)
-        thermal_note = QLabel(
-            "RECORDED THERMAL HUD  |  Avg, Max, Trend, Hold and Fire tracking"
-        )
-        thermal_note.setStyleSheet(
-            "color: #60a5fa; font-size: 8pt; font-weight: 700;"
-        )
-        thermal_layout.addWidget(thermal_note)
-        thermal_grid = QGridLayout()
+        thermal_grid = QGridLayout(thermal_analysis)
         thermal_grid.setSpacing(6)
-        thermal_layout.addLayout(thermal_grid)
 
         self.thermal_avg_card = MetricCard("AVG", "--", "°C")
         self.thermal_max_card = MetricCard("MAX", "--", "°C")
@@ -831,24 +818,9 @@ class MainWindow(QMainWindow):
         thermal_grid.addWidget(self.thermal_fire_card, 1, 1, 1, 2)
         content.addWidget(thermal_analysis, 1, 0)
 
-        right_controls = QWidget()
-        right_layout = QVBoxLayout(right_controls)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(6)
-
         rgb_analysis = QGroupBox("Real-Time RGB Fire Detection")
-        rgb_layout = QVBoxLayout(rgb_analysis)
-        rgb_layout.setSpacing(5)
-        rgb_note = QLabel(
-            "VIDEO-DETECTOR EVIDENCE  |  ON only while a bounding box is visible"
-        )
-        rgb_note.setStyleSheet(
-            "color: #22d3ee; font-size: 8pt; font-weight: 700;"
-        )
-        rgb_layout.addWidget(rgb_note)
-        rgb_grid = QGridLayout()
+        rgb_grid = QGridLayout(rgb_analysis)
         rgb_grid.setSpacing(6)
-        rgb_layout.addLayout(rgb_grid)
 
         self.rgb_overlay_card = MetricCard("Detection Overlay", "0.000", "%")
         self.rgb_regions_card = MetricCard("Alert Regions", "0")
@@ -866,15 +838,14 @@ class MainWindow(QMainWindow):
         ]
         for index, card in enumerate(rgb_cards):
             rgb_grid.addWidget(card, index // 3, index % 3)
-        right_layout.addWidget(rgb_analysis)
+        content.addWidget(rgb_analysis, 1, 1)
 
         self.stop_btn = QPushButton("EMERGENCY STOP")
         self.stop_btn.setStyleSheet("background-color: #b91c1c; color: white;")
         self.stop_btn.setMinimumHeight(44)
         self.stop_btn.setMaximumHeight(54)
         self.stop_btn.clicked.connect(self.toggle_pause)
-        right_layout.addWidget(self.stop_btn)
-        content.addWidget(right_controls, 1, 1)
+        content.addWidget(self.stop_btn, 2, 1)
 
     def create_video_group(self, title: str, placeholder: str):
         group = QGroupBox(title)
@@ -1029,41 +1000,20 @@ class MainWindow(QMainWindow):
             self.last_banner_state = state
             self.apply_banner_style()
 
-    def animate_fire_banner(self) -> None:
-        if self.current_fire:
-            self.blink_on = not self.blink_on
-            self.apply_banner_style()
-
     def apply_banner_style(self) -> None:
-        if self.paused:
-            self.status_label.setText("MONITORING PAUSED  |  FIRE OFF")
-            self.status_label.setStyleSheet(
-                "background-color: #713f12; color: #fef3c7; border-radius: 12px; "
-                "font-size: 22pt; font-weight: 900; padding: 8px;"
-            )
-            return
-
         if self.current_fire:
-            background = "#dc2626" if self.blink_on else "#7f1d1d"
-            self.status_label.setText(
-                "FIRE ON  |  THERMAL + RGB CONFIRMED  |  DEPLOYMENT REQUIRED"
-            )
+            self.status_label.setText("FIRE ON")
             self.status_label.setStyleSheet(
-                f"background-color: {background}; color: #fff7ed; "
-                "border-radius: 12px; font-size: 22pt; font-weight: 950; "
+                "background-color: #dc2626; color: #fff7ed; "
+                "border-radius: 12px; font-size: 27pt; font-weight: 950; "
                 "padding: 8px;"
             )
             return
 
-        thermal_text = "ON" if self.thermal_detected else "OFF"
-        rgb_text = "ON" if self.rgb_detected else "OFF"
-        background = "#78350f" if (self.thermal_detected or self.rgb_detected) else "#1e293b"
-        self.status_label.setText(
-            f"MONITORING  |  THERMAL {thermal_text} + RGB {rgb_text}  |  FIRE OFF"
-        )
+        self.status_label.setText("FIRE OFF")
         self.status_label.setStyleSheet(
-            f"background-color: {background}; color: #e5edf7; "
-            "border-radius: 12px; font-size: 20pt; font-weight: 900; "
+            "background-color: #166534; color: #ecfdf5; "
+            "border-radius: 12px; font-size: 27pt; font-weight: 950; "
             "padding: 8px;"
         )
 
