@@ -68,6 +68,53 @@ ros2 run infiray_ros2 thermal_camera_fire_detect --ros-args \
 
 종료할 때는 `Ctrl+C`를 누릅니다.
 
+## 열화상·RGB 동시 모니터링 UI 실행
+
+[`thermal_and_rgb_fire_detection_ui.py`](src/test/thermal_and_rgb_fire_detection_ui.py)는 저장된 열화상 영상과 RGB 객체 인식 영상을 동시에 재생하는 PyQt5 UI입니다.
+
+- 왼쪽 `Thermal Image Stream`: `~/Desktop/thermal_obj_test.mp4`
+- 오른쪽 `RGB Object Detection Stream`: `~/Desktop/rgb_obj_test.mp4`
+- 두 영상은 각각 원본 FPS로 재생되며, 마지막 프레임 이후 처음부터 반복 재생됨
+- 온도, 온도 변화량 및 화재 감지 결과는 기존 ROS 2 토픽을 구독해 표시함
+
+실행하기 전에 다음 두 영상 파일이 존재하는지 확인합니다.
+
+```bash
+ls -lh ~/Desktop/thermal_obj_test.mp4 ~/Desktop/rgb_obj_test.mp4
+```
+
+화재 감지 노드와 UI를 함께 사용할 때는 서로 다른 터미널에서 실행합니다.
+
+### 터미널 1: 열화상 화재 감지 노드
+
+```bash
+cd /home/hyun/dev/repos/infiray_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 run infiray_ros2 thermal_camera_fire_detect_raw16
+```
+
+### 터미널 2: 열화상·RGB UI
+
+```bash
+cd /home/hyun/dev/repos/infiray_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+PYTHONNOUSERSITE=1 python3 src/test/thermal_and_rgb_fire_detection_ui.py
+```
+
+이 시스템에서는 사용자 영역의 NumPy 2.x와 ROS Humble의 `cv_bridge` 사이에서 호환성 문제가 발생할 수 있으므로 UI 실행 명령에 `PYTHONNOUSERSITE=1`을 사용합니다.
+
+UI만 단독으로 실행할 수도 있습니다. 이 경우 두 MP4 영상은 재생되지만 ROS 2 메시지를 받지 못하므로 온도는 `0.0`, 화재 감지 결과는 `OFF` 상태로 유지됩니다. UI의 상태 카드가 구독하는 토픽은 다음과 같습니다.
+
+| 토픽 | 형식 | UI 표시 항목 |
+| --- | --- | --- |
+| `/thermal/max_temperature` | `std_msgs/msg/Float32` | 최고 및 최대 온도 |
+| `/thermal/temperature_trend` | `std_msgs/msg/Float32` | 초당 온도 변화량 |
+| `/thermal/fire_detected` | `std_msgs/msg/Bool` | 화재 감지 상태와 경고 배너 |
+
+다른 영상 파일을 사용하려면 `thermal_and_rgb_fire_detection_ui.py` 상단의 `THERMAL_VIDEO_PATH`와 `RGB_VIDEO_PATH` 값을 변경합니다. UI 종료는 창을 닫거나 실행한 터미널에서 `Ctrl+C`를 누릅니다.
+
 ## 주요 ROS 2 토픽
 
 | 토픽 | 형식 | 설명 |
