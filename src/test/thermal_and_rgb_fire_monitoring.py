@@ -3,8 +3,8 @@
 This UI is intended for recorded videos that do not have matching sensor logs.
 It calculates repeatable visual metrics directly from every video frame:
 
-* Thermal: normalized peak intensity, hot-area ratio, contrast, frame change,
-  and the colour-coded Fire ON/OFF cue already burned into the supplied video.
+* Thermal: Avg, Max, Trend, Hold, and Fire ON/OFF values read from the HUD
+  already burned into the supplied video.
 * RGB: cyan detector-overlay ratio, large detection regions, frame motion, and
   a visual evidence score that is active only while a bounding box is visible.
 
@@ -16,6 +16,7 @@ is asserted only while both the thermal and RGB decisions are ON.
 from __future__ import annotations
 
 import argparse
+import itertools
 import math
 import os
 import sys
@@ -95,11 +96,10 @@ class LoopingVideo:
 
 @dataclass
 class ThermalMetrics:
-    apparent_peak: float = 0.0
-    hot_area: float = 0.0
-    contrast: float = 0.0
-    frame_change: float = 0.0
-    confidence: float = 0.0
+    average_temperature: Optional[float] = None
+    maximum_temperature: Optional[float] = None
+    temperature_trend: Optional[float] = None
+    hold_seconds: float = 0.0
     detected: bool = False
 
 
@@ -113,6 +113,358 @@ class RGBMetrics:
     detected: bool = False
 
 
+class ThermalHudReader:
+    """Read the fixed OpenCV HUD burned into the recorded thermal video.
+
+    The source node writes the values with FONT_HERSHEY_SIMPLEX.  A small
+    synthetic glyph set is therefore enough to recognize the digits without
+    adding Tesseract or another OCR dependency.
+    """
+
+    NORMALIZED_SIZE = (600, 600)
+    FONT = cv2.FONT_HERSHEY_SIMPLEX
+    FONT_SCALE = 0.735
+
+    def __init__(self, fps: float):
+        self.dt = 1.0 / max(fps, 1.0)
+        self.white_templates = self._make_digit_templates(thickness=1)
+        self.color_templates = self._make_digit_templates(thickness=3)
+        self.reset()
+
+    def reset(self) -> None:
+        self.average_temperature: Optional[float] = None
+        self.maximum_temperature: Optional[float] = None
+        self.temperature_trend: Optional[float] = None
+        self.hold_seconds = 0.0
+        self.hold_initialized = False
+        self.last_fire: Optional[bool] = None
+        self.transition_grace = 0
+
+    @classmethod
+    def _normalize_glyph(cls, glyph: np.ndarray) -> np.ndarray:
+        ys, xs = np.where(glyph > 0)
+        output = np.zeros((28, 20), dtype=np.uint8)
+        if len(xs) == 0:
+            return output
+
+        cropped = glyph[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1]
+        scale = min(18.0 / cropped.shape[1], 24.0 / cropped.shape[0])
+        resized = cv2.resize(
+            cropped,
+            (
+                max(1, round(cropped.shape[1] * scale)),
+                max(1, round(cropped.shape[0] * scale)),
+            ),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        y = (output.shape[0] - resized.shape[0]) // 2
+        x = (output.shape[1] - resized.shape[1]) // 2
+        output[y : y + resized.shape[0], x : x + resized.shape[1]] = resized
+        return output
+
+    @classmethod
+    def _make_digit_templates(cls, thickness: int) -> dict[str, np.ndarray]:
+        templates = {}
+        for digit in "0123456789":
+            canvas = np.zeros((40, 40), dtype=np.uint8)
+            cv2.putText(
+                canvas,
+                digit,
+                (5, 28),
+                cls.FONT,
+                cls.FONT_SCALE,
+                255,
+                thickness,
+            )
+            templates[digit] = cls._normalize_glyph(canvas)
+        return templates
+
+    @staticmethod
+    def _glyph_distance(first: np.ndarray, second: np.ndarray) -> float:
+        first_mask = first > 0
+        second_mask = second > 0
+        if not first_mask.any() or not second_mask.any():
+            return float("inf")
+        first_distance = cv2.distanceTransform(
+            (~first_mask).astype(np.uint8), cv2.DIST_L2, 3
+        )
+        second_distance = cv2.distanceTransform(
+            (~second_mask).astype(np.uint8), cv2.DIST_L2, 3
+        )
+        return float(
+            first_distance[second_mask].mean()
+            + second_distance[first_mask].mean()
+        )
+
+    def _classify_digit(
+        self,
+        binary: np.ndarray,
+        component: tuple[int, int, int, int],
+        colored: bool = False,
+    ) -> Optional[str]:
+        x, y, width, height = component
+        if height < 10 or not 5 <= width <= 18:
+            return None
+        glyph = self._normalize_glyph(binary[y : y + height, x : x + width])
+        templates = self.color_templates if colored else self.white_templates
+        ranked = sorted(
+            (self._glyph_distance(glyph, template), digit)
+            for digit, template in templates.items()
+        )
+        if not ranked or ranked[0][0] > 3.2:
+            return None
+        return ranked[0][1]
+
+    @staticmethod
+    def _white_components(
+        frame: np.ndarray, crop: tuple[int, int, int, int]
+    ) -> tuple[np.ndarray, list[tuple[int, int, int, int]]]:
+        y0, y1, x0, x1 = crop
+        gray = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+        top_hat = cv2.morphologyEx(
+            gray, cv2.MORPH_TOPHAT, np.ones((17, 17), dtype=np.uint8)
+        )
+        _, binary = cv2.threshold(
+            top_hat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+        contours, _ = cv2.findContours(
+            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        components = [
+            cv2.boundingRect(contour)
+            for contour in contours
+            if cv2.contourArea(contour) >= 1.0
+        ]
+        return binary, sorted(components)
+
+    def _nearest_digit(
+        self,
+        binary: np.ndarray,
+        components: list[tuple[int, int, int, int]],
+        target_x: int,
+        colored: bool = False,
+    ) -> Optional[str]:
+        candidates = []
+        for component in components:
+            digit = self._classify_digit(binary, component, colored=colored)
+            if digit is not None and abs(component[0] - target_x) <= 4:
+                candidates.append((abs(component[0] - target_x), digit))
+        return min(candidates)[1] if candidates else None
+
+    def _fixed_patch_digit(
+        self, binary: np.ndarray, target_x: int
+    ) -> Optional[str]:
+        patch = binary[3:27, max(0, target_x - 1) : target_x + 14]
+        glyph = self._normalize_glyph(patch)
+        ranked = sorted(
+            (self._glyph_distance(glyph, template), digit)
+            for digit, template in self.white_templates.items()
+        )
+        if not ranked or ranked[0][0] > 3.2:
+            return None
+        return ranked[0][1]
+
+    def _read_digit_at(
+        self,
+        binary: np.ndarray,
+        components: list[tuple[int, int, int, int]],
+        target_x: int,
+    ) -> Optional[str]:
+        digit = self._nearest_digit(binary, components, target_x)
+        if digit is not None:
+            return digit
+        return self._fixed_patch_digit(binary, target_x)
+
+    def _read_one_decimal(
+        self, frame: np.ndarray, crop: tuple[int, int, int, int]
+    ) -> Optional[float]:
+        binary, components = self._white_components(frame, crop)
+        digits = [
+            self._read_digit_at(binary, components, x) for x in (4, 19, 40)
+        ]
+        if any(digit is None for digit in digits):
+            return None
+        return float(f"{digits[0]}{digits[1]}.{digits[2]}")
+
+    def _read_trend(self, frame: np.ndarray) -> Optional[float]:
+        binary, components = self._white_components(frame, (55, 82, 85, 170))
+        is_negative = any(
+            4 <= x <= 12 and height <= 6 and width >= 8
+            for x, _, width, height in components
+        )
+        slots = (25, 45, 60) if is_negative else (8, 28, 43)
+        digits = [self._read_digit_at(binary, components, x) for x in slots]
+        if any(digit is None for digit in digits):
+            return None
+        sign = "-" if is_negative else ""
+        return float(f"{sign}{digits[0]}.{digits[1]}{digits[2]}")
+
+    def _read_hold(self, frame: np.ndarray) -> Optional[float]:
+        roi = frame[80:108, 72:200]
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        binary = cv2.inRange(hsv, (35, 60, 80), (115, 255, 255))
+        contours, _ = cv2.findContours(
+            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        components = [
+            cv2.boundingRect(contour)
+            for contour in contours
+            if cv2.contourArea(contour) >= 1.0
+        ]
+
+        # The trailing "s" moves with the value width, so it tells us whether
+        # Hold currently contains one, two, or three integer digits.
+        suffix_positions = [
+            x
+            for x, _, width, height in components
+            if x >= 64 and width >= 8 and height >= 10
+        ]
+        if not suffix_positions:
+            return None
+        suffix_match = min(
+            (abs(x - expected), expected)
+            for x in suffix_positions
+            for expected in (68, 82, 96)
+        )
+        if suffix_match[0] > 5:
+            return None
+        suffix_x = suffix_match[1]
+        if suffix_x == 96:
+            slots = (6, 22, 36, 56, 71)
+            decimal_index = 3
+        elif suffix_x == 82:
+            slots = (7, 21, 42, 56)
+            decimal_index = 2
+        else:
+            slots = (8, 28, 42)
+            decimal_index = 1
+
+        ranked_slots = []
+        for target_x in slots:
+            patch = binary[3:27, max(0, target_x - 1) : target_x + 14]
+            glyph = self._normalize_glyph(patch)
+            ranked = sorted(
+                (self._glyph_distance(glyph, template), digit)
+                for digit, template in self.color_templates.items()
+            )[:2]
+            if not ranked or ranked[0][0] > 3.2:
+                return None
+            ranked_slots.append(ranked)
+
+        candidates = []
+        for selection in itertools.product(*ranked_slots):
+            digits = [item[1] for item in selection]
+            number_text = (
+                "".join(digits[:decimal_index])
+                + "."
+                + "".join(digits[decimal_index:])
+            )
+            value = float(number_text)
+            shape_score = sum(item[0] for item in selection)
+            if self.hold_initialized:
+                score = shape_score + abs(value - self.hold_seconds) * 0.10
+            else:
+                score = shape_score
+            candidates.append((score, value))
+
+        if not candidates:
+            return None
+        return min(candidates)[1]
+
+    def read(
+        self, frame: np.ndarray, fire_on: bool, run_ocr: bool
+    ) -> tuple[Optional[float], Optional[float], Optional[float], float]:
+        if frame.shape[1] != 600 or frame.shape[0] != 600:
+            frame = cv2.resize(frame, self.NORMALIZED_SIZE, interpolation=cv2.INTER_AREA)
+
+        state_changed = self.last_fire is not None and fire_on != self.last_fire
+        if state_changed:
+            self.transition_grace = 5
+        self.last_fire = fire_on
+
+        if self.maximum_temperature is not None:
+            if self.maximum_temperature >= 40.0:
+                self.hold_seconds += self.dt
+            else:
+                self.hold_seconds = 0.0
+
+        if not run_ocr:
+            return (
+                self.average_temperature,
+                self.maximum_temperature,
+                self.temperature_trend,
+                self.hold_seconds,
+            )
+
+        average = self._read_one_decimal(frame, (5, 34, 64, 130))
+        maximum = self._read_one_decimal(frame, (30, 57, 69, 138))
+        trend = self._read_trend(frame)
+
+        allow_jump = self.transition_grace > 0
+        if maximum is not None and 0.0 <= maximum <= 99.9:
+            average_floor = (
+                average
+                if average is not None and 0.0 <= average <= 99.9
+                else (self.average_temperature or 0.0)
+            )
+            crossed_hot_threshold = (
+                fire_on
+                and self.maximum_temperature is not None
+                and self.maximum_temperature < 40.0 <= maximum
+            )
+            if maximum + 0.5 >= average_floor and (
+                self.maximum_temperature is None
+                or allow_jump
+                or crossed_hot_threshold
+                or abs(maximum - self.maximum_temperature) <= 8.0
+            ):
+                self.maximum_temperature = maximum
+
+        if average is not None and 0.0 <= average <= 99.9:
+            below_maximum = (
+                self.maximum_temperature is None
+                or average <= self.maximum_temperature + 0.5
+            )
+            if below_maximum and (
+                self.average_temperature is None
+                or allow_jump
+                or abs(average - self.average_temperature) <= 1.0
+            ):
+                self.average_temperature = average
+
+        if trend is not None and -30.0 <= trend <= 30.0:
+            self.temperature_trend = trend
+
+        if self.maximum_temperature is not None and self.maximum_temperature < 40.0:
+            self.hold_seconds = 0.0
+        hold = self._read_hold(frame)
+        if hold is not None and 0.0 <= hold <= 999.99:
+            predicted_close = abs(hold - self.hold_seconds) <= 0.75
+            reset_correction = (
+                self.maximum_temperature is not None
+                and self.maximum_temperature < 40.0
+                and hold <= 0.1
+            )
+            if (
+                not self.hold_initialized
+                or allow_jump
+                or predicted_close
+                or reset_correction
+            ):
+                self.hold_seconds = hold
+                self.hold_initialized = True
+
+        if self.transition_grace > 0:
+            self.transition_grace -= 1
+
+        return (
+            self.average_temperature,
+            self.maximum_temperature,
+            self.temperature_trend,
+            self.hold_seconds,
+        )
+
+
 class ThermalFrameAnalyzer:
     """Calculate thermal-looking metrics from rendered video pixels.
 
@@ -124,12 +476,17 @@ class ThermalFrameAnalyzer:
 
     def __init__(self, fps: float):
         self.dt = 1.0 / max(fps, 1.0)
+        self.ocr_interval = max(1, round(fps / 10.0))
+        self.frame_number = 0
+        self.hud_reader = ThermalHudReader(fps)
         self.previous_gray: Optional[np.ndarray] = None
         self.frame_change = 0.0
         self.confidence = 0.0
         self.detected = False
 
     def reset(self) -> None:
+        self.frame_number = 0
+        self.hud_reader.reset()
         self.previous_gray = None
         self.frame_change = 0.0
         self.confidence = 0.0
@@ -199,20 +556,30 @@ class ThermalFrameAnalyzer:
         else:
             target = feature_score
 
-        self.confidence = exponential_step(
-            self.confidence, target, self.dt, rise_tau=0.20, fall_tau=0.18
+        if hud_on is not None:
+            # Follow the recorded thermal Fire indicator on the current frame.
+            self.detected = hud_on
+            self.confidence = 100.0 if hud_on else 0.0
+        else:
+            self.confidence = exponential_step(
+                self.confidence, target, self.dt, rise_tau=0.20, fall_tau=0.18
+            )
+            if not self.detected and self.confidence >= THERMAL_ON_THRESHOLD:
+                self.detected = True
+            elif self.detected and self.confidence <= THERMAL_OFF_THRESHOLD:
+                self.detected = False
+
+        run_ocr = self.frame_number % self.ocr_interval == 0
+        average, maximum, trend, hold = self.hud_reader.read(
+            frame, self.detected, run_ocr
         )
-        if not self.detected and self.confidence >= THERMAL_ON_THRESHOLD:
-            self.detected = True
-        elif self.detected and self.confidence <= THERMAL_OFF_THRESHOLD:
-            self.detected = False
+        self.frame_number += 1
 
         return ThermalMetrics(
-            apparent_peak=apparent_peak,
-            hot_area=hot_area,
-            contrast=contrast,
-            frame_change=self.frame_change,
-            confidence=self.confidence,
+            average_temperature=average,
+            maximum_temperature=maximum,
+            temperature_trend=trend,
+            hold_seconds=hold,
             detected=self.detected,
         )
 
@@ -438,7 +805,7 @@ class MainWindow(QMainWindow):
         thermal_layout = QVBoxLayout(thermal_analysis)
         thermal_layout.setSpacing(5)
         thermal_note = QLabel(
-            "IMAGE-DERIVED ESTIMATES  |  normalized values, not sensor telemetry"
+            "RECORDED THERMAL HUD  |  Avg, Max, Trend, Hold and Fire tracking"
         )
         thermal_note.setStyleSheet(
             "color: #60a5fa; font-size: 8pt; font-weight: 700;"
@@ -448,22 +815,20 @@ class MainWindow(QMainWindow):
         thermal_grid.setSpacing(6)
         thermal_layout.addLayout(thermal_grid)
 
-        self.thermal_peak_card = MetricCard("Apparent Peak", "0.0", "%")
-        self.hot_area_card = MetricCard("High-Intensity Area", "0.00", "%")
-        self.thermal_contrast_card = MetricCard("Thermal Contrast", "0.0", "%")
-        self.thermal_change_card = MetricCard("Frame Change", "0.00", "%")
-        self.thermal_confidence_card = MetricCard("Thermal Confidence", "0.0", "%")
-        self.thermal_decision_card = MetricCard("Thermal Decision", "OFF")
+        self.thermal_avg_card = MetricCard("AVG", "--", "°C")
+        self.thermal_max_card = MetricCard("MAX", "--", "°C")
+        self.thermal_trend_card = MetricCard("TREND", "--", "°C/s")
+        self.thermal_hold_card = MetricCard("HOLD", "0.00", "s")
+        self.thermal_fire_card = MetricCard("FIRE", "OFF")
         thermal_cards = [
-            self.thermal_peak_card,
-            self.hot_area_card,
-            self.thermal_contrast_card,
-            self.thermal_change_card,
-            self.thermal_confidence_card,
-            self.thermal_decision_card,
+            self.thermal_avg_card,
+            self.thermal_max_card,
+            self.thermal_trend_card,
         ]
         for index, card in enumerate(thermal_cards):
-            thermal_grid.addWidget(card, index // 3, index % 3)
+            thermal_grid.addWidget(card, 0, index)
+        thermal_grid.addWidget(self.thermal_hold_card, 1, 0)
+        thermal_grid.addWidget(self.thermal_fire_card, 1, 1, 1, 2)
         content.addWidget(thermal_analysis, 1, 0)
 
         right_controls = QWidget()
@@ -597,16 +962,43 @@ class MainWindow(QMainWindow):
         self.render_video_frame(frame, self.rgb_video_label, "RGB", metrics.detected)
 
     def update_thermal_metrics(self, metrics: ThermalMetrics) -> None:
-        self.thermal_peak_card.set_value(f"{metrics.apparent_peak:.1f}")
-        self.hot_area_card.set_value(f"{metrics.hot_area:.2f}")
-        self.thermal_contrast_card.set_value(f"{metrics.contrast:.1f}")
-        self.thermal_change_card.set_value(f"{metrics.frame_change:.2f}")
-        self.thermal_confidence_card.set_value(f"{metrics.confidence:.1f}")
-        self.thermal_confidence_card.set_alert_level(
-            "critical" if metrics.detected else "normal"
+        average_text = (
+            f"{metrics.average_temperature:.1f}"
+            if metrics.average_temperature is not None
+            else "--"
         )
-        self.thermal_decision_card.set_value("ON" if metrics.detected else "OFF")
-        self.thermal_decision_card.set_alert_level(
+        maximum_text = (
+            f"{metrics.maximum_temperature:.1f}"
+            if metrics.maximum_temperature is not None
+            else "--"
+        )
+        trend_text = (
+            f"{metrics.temperature_trend:.2f}"
+            if metrics.temperature_trend is not None
+            else "--"
+        )
+        self.thermal_avg_card.set_value(average_text)
+        self.thermal_max_card.set_value(maximum_text)
+        self.thermal_trend_card.set_value(trend_text)
+        self.thermal_hold_card.set_value(f"{metrics.hold_seconds:.2f}")
+
+        if metrics.maximum_temperature is not None:
+            if metrics.maximum_temperature >= 60.0:
+                max_level = "critical"
+            elif metrics.maximum_temperature >= 40.0:
+                max_level = "warning"
+            else:
+                max_level = "normal"
+            self.thermal_max_card.set_alert_level(max_level)
+        trend_level = (
+            "warning"
+            if metrics.temperature_trend is not None
+            and metrics.temperature_trend >= 0.3
+            else "normal"
+        )
+        self.thermal_trend_card.set_alert_level(trend_level)
+        self.thermal_fire_card.set_value("ON" if metrics.detected else "OFF")
+        self.thermal_fire_card.set_alert_level(
             "critical" if metrics.detected else "safe"
         )
         self.thermal_detected = metrics.detected
