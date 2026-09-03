@@ -10,7 +10,8 @@ It calculates repeatable visual metrics directly from every video frame:
 
 The displayed values are image-derived estimates, not radiometric temperature
 measurements or raw neural-network confidence values.  The final FIRE ON state
-is asserted only while both the thermal and RGB decisions are ON.
+is controlled by the RGB decision after it remains ON for 0.2 seconds, and an
+activated alert stays ON for at least 0.6 seconds.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import itertools
 import math
 import os
 import sys
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -52,6 +54,8 @@ RGB_VIDEO_PATH = os.path.expanduser(
 MIN_VIDEO_SIZE = (360, 270)
 THERMAL_ON_THRESHOLD = 60.0
 THERMAL_OFF_THRESHOLD = 40.0
+FIRE_CONFIRM_SECONDS = 0.2
+FIRE_MIN_ON_SECONDS = 0.6
 
 
 def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
@@ -724,8 +728,10 @@ class MainWindow(QMainWindow):
         self.thermal_detected = False
         self.rgb_detected = False
         self.current_fire = False
+        self.fire_candidate_started_at: Optional[float] = None
+        self.fire_on_started_at: Optional[float] = None
         self.paused = False
-        self.last_banner_state: Optional[tuple[bool, bool, bool]] = None
+        self.last_banner_state: Optional[tuple[bool, bool, bool, bool]] = None
 
         self.init_ui()
         self.open_videos()
@@ -991,11 +997,49 @@ class MainWindow(QMainWindow):
         self.rgb_detected = metrics.detected
         self.update_final_decision()
 
-    def update_final_decision(self, force: bool = False) -> None:
-        self.current_fire = (
-            not self.paused and self.thermal_detected and self.rgb_detected
+    def update_final_decision(
+        self, force: bool = False, now: Optional[float] = None
+    ) -> None:
+        timestamp = time.monotonic() if now is None else now
+        rgb_source_on = not self.paused and self.rgb_detected
+
+        if self.paused:
+            self.fire_candidate_started_at = None
+            self.fire_on_started_at = None
+            self.current_fire = False
+        elif self.current_fire:
+            # Once activated, keep FIRE ON for at least 0.6 seconds even if the
+            # RGB bounding box briefly disappears.
+            on_elapsed = (
+                timestamp - self.fire_on_started_at
+                if self.fire_on_started_at is not None
+                else FIRE_MIN_ON_SECONDS
+            )
+            if not rgb_source_on and on_elapsed + 1e-9 >= FIRE_MIN_ON_SECONDS:
+                self.current_fire = False
+                self.fire_on_started_at = None
+                self.fire_candidate_started_at = None
+        elif rgb_source_on:
+            if self.fire_candidate_started_at is None:
+                self.fire_candidate_started_at = timestamp
+            confirmed = (
+                timestamp - self.fire_candidate_started_at + 1e-9
+                >= FIRE_CONFIRM_SECONDS
+            )
+            if confirmed:
+                self.current_fire = True
+                self.fire_on_started_at = timestamp
+                self.fire_candidate_started_at = None
+        else:
+            self.fire_candidate_started_at = None
+            self.current_fire = False
+
+        state = (
+            self.thermal_detected,
+            self.rgb_detected,
+            self.paused,
+            self.current_fire,
         )
-        state = (self.thermal_detected, self.rgb_detected, self.paused)
         if force or state != self.last_banner_state:
             self.last_banner_state = state
             self.apply_banner_style()
@@ -1021,7 +1065,7 @@ class MainWindow(QMainWindow):
         self, frame: np.ndarray, label: QLabel, source_name: str, source_on: bool
     ) -> None:
         frame_to_show = frame.copy()
-        height, width = frame_to_show.shape[:2]
+        width = frame_to_show.shape[1]
 
         badge_text = f"{source_name} {'ON' if source_on else 'OFF'}"
         badge_color = (0, 80, 255) if source_on else (50, 205, 50)
@@ -1046,16 +1090,6 @@ class MainWindow(QMainWindow):
             2,
             cv2.LINE_AA,
         )
-
-        if self.current_fire:
-            thickness = max(3, min(width, height) // 100)
-            cv2.rectangle(
-                frame_to_show,
-                (8, 8),
-                (width - 8, height - 8),
-                (0, 0, 255),
-                thickness,
-            )
 
         rgb_image = cv2.cvtColor(frame_to_show, cv2.COLOR_BGR2RGB)
         image_height, image_width, channels = rgb_image.shape
